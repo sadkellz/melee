@@ -69,7 +69,12 @@ static inline HSD_JObj* get_jobj(HSD_GObj* gobj)
     return gobj->hsd_obj;
 }
 
+#ifdef MELEE_DEMO
+/* 156310 */ void ftCh_Init_80156310(HSD_GObj* gobj);
+#else
 /* 156310 */ static void ftCh_Init_80156310(HSD_GObj* gobj);
+#endif
+
 /* 157080 */ static void fn_80157080(Fighter_GObj* gobj);
 /* 15746C */ static void fn_8015746C(HSD_GObj* gobj);
 /* 15755C */ static void fn_8015755C(HSD_GObj* gobj);
@@ -82,13 +87,29 @@ static inline HSD_JObj* get_jobj(HSD_GObj* gobj)
 /* 15ABD0 */ static void ftCh_GrabUnk1_8015ABD0(HSD_GObj* gobj);
 /* 15AC50 */ static void ftCh_GrabUnk1_8015AC50(HSD_GObj* gobj);
 /* 15B174 */ void ftCh_GrabUnk1_8015B174(HSD_GObj* gobj);
+#ifdef MELEE_DEMO
+/* 15B548 */ void fn_8015B548(HSD_GObj* gobj, HSD_GObj* gobj2);
+#else
 /* 15B548 */ static void fn_8015B548(HSD_GObj* gobj, HSD_GObj* gobj2);
+#endif
 /* 15B2C0 */ static void fn_8015B2C0(HSD_GObj* gobj);
+#ifdef MELEE_DEMO
+/* 15B670 */ void ftCh_GrabUnk1_8015B670(HSD_GObj* gobj);
+#else
 /* 15B670 */ static void ftCh_GrabUnk1_8015B670(HSD_GObj* gobj);
+#endif
 /* 15B998 */ static void ftCh_GrabUnk1_8015B998(HSD_GObj* gobj);
+#ifdef MELEE_DEMO
+/* 156198 */ void ftCh_Init_80156198(HSD_GObj* gobj);
+#else
 /* 156198 */ static void ftCh_Init_80156198(HSD_GObj* gobj);
+#endif
 /* 15B4EC */ bool fn_8015B4EC(Vec3* vec);
+#ifdef MELEE_DEMO
+/* 1577B4 */ void fn_801577B4(HSD_GObj* gobj);
+#else
 /* 1577B4 */ static void fn_801577B4(HSD_GObj* gobj);
+#endif
 /* 159AA4 */ static void fn_80159AA4(HSD_GObj* gobj);
 
 extern f32 ftCh_Init_804DA070;
