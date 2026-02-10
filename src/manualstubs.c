@@ -324,7 +324,7 @@ void hsd_803B2374() {}
 void lbMthp_8001F87C() {}
 void lbMthp_8001F800() {}
 void lbAudioAx_80028690() {}
-void gm_801BF3F8() {} // menu title load demo
+// void gm_801BF3F8() {} // menu title load demo
 
 int hsd_804D78A0;
 
@@ -965,3 +965,6 @@ void vi1202_OnFrame(void) {}
 // Game data stubs
 s32 gm_804D67EC;
 s32 gm_804D67F0;
+
+
+// void gm_801BF708(s8 arg0) {}

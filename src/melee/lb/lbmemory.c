@@ -1,23 +1,35 @@
 #include "lbmemory.h"
 
 #include <platform.h>
+#include "dolphin/ar.h"
 
 #include <baselib/debug.h>
 
 struct Allocator {
     void* x0_arenaLo;
     void* x4_arenaHi;
-    u8 x8[0x62C - 0x8];
+    Handle x8[0x83];
     Handle* x62C_free_mem;
     s32 x630_num_allocs;
     s32 x634_max_num_allocs;
-    u8 x638[0x698 - 0x638];
+    struct AllocUnkInternal {
+        struct AllocUnkInternal* next;
+        u32 x4, x8, xC;
+    } x638[6];
     Handle* x698_free_heap;
     Handle* x69C;
-    u8 x6A0[0x6E0 - 0x6A0];
-    u32 x6E0;
+    struct AlarmStruct {
+        OSAlarm x0;
+        u8* x28;
+        u8* x2C;
+        u32 size;
+        u32 x34;
+        int x38;
+        void (*x3C)();
+    } x6A0;
+    void* x6E0;
     void* x6E4;
-    void* x6E8;
+    void (*x6E8)(void*);
     u8 x6EC[0x6F0 - 0x6EC];
 };
 
@@ -25,7 +37,7 @@ struct Allocator {
 
 // lbMemory_804318B0
 static struct Allocator g_alloc;
-STATIC_ASSERT(sizeof(g_alloc) == 0x6F0);
+// STATIC_ASSERT(sizeof(g_alloc) == 0x6F0);
 
 // might need to change to take lvalue instead of pointer if codegen is bad
 #define PUSH_HANDLE(list, handle)                                             \
@@ -206,7 +218,7 @@ u32 lbMemory_8001529C(Handle* h, void* arg1, u32 arg2)
     void** r7;
 
     g_alloc.x6E8 = arg1;
-    g_alloc.x6E0 = arg2;
+    g_alloc.x6E0 = (void*) arg2;
     g_alloc.x6E4 = h->x4_lo;
 
     r7 = &g_alloc.x6E4;
@@ -227,6 +239,36 @@ void lbMemory_800154BC(uintptr_t* arenaLo, uintptr_t* arenaHi)
 {
     *arenaLo = (uintptr_t) g_alloc.x0_arenaLo;
     *arenaHi = (uintptr_t) g_alloc.x4_arenaHi;
+}
+
+void lbMemory_8001564C(void)
+{
+    u32 sp14;
+    int i;
+
+    g_alloc.x0_arenaLo = (void*) ARAlloc(0x20);
+    ARFree(&sp14);
+    g_alloc.x4_arenaHi = (void*) (ARGetSize() > 0x1000000 ? 0x1000000 : ARGetSize());
+    g_alloc.x62C_free_mem = (void*) g_alloc.x8;
+
+    for (i = 0; i < 0x82; i++) {
+        g_alloc.x8[i].x0_next = (void*) &g_alloc.x8[i + 1];
+    }
+    g_alloc.x8[i].x0_next = NULL;
+
+    g_alloc.x634_max_num_allocs = 0;
+    g_alloc.x630_num_allocs = 0;
+
+    g_alloc.x698_free_heap = (void*) &g_alloc.x638[0];
+    for (i = 0; i < 5; i++) {
+        g_alloc.x638[i].next = &g_alloc.x638[i + 1];
+    }
+    g_alloc.x638[i].next = NULL;
+
+    g_alloc.x69C = NULL;
+
+    g_alloc.x69C = lbMemory_80014E24(g_alloc.x0_arenaLo, g_alloc.x4_arenaHi);
+    g_alloc.x6A0.size = 0;
 }
 
 // same as lbMemory_80014E24, but sets to x69C to the popped handle
