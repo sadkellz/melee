@@ -209,10 +209,28 @@ parser.add_argument(
     action="store_false",
     help="do not always run dtk dol apply after linking",
 )
+parser.add_argument(
+    "--mod",
+    metavar="DIR",
+    dest="mod",
+    action="append",
+    type=Path,
+    default=[],
+    help="build a modded DOL with the given mod directory linked in (repeatable); see docs/modding.md",
+)
 args = parser.parse_args()
 
 if any({args.debug, args.asm, args.linkable}) or args.sym == "on":
     args.non_matching = True
+
+mod_mode = len(args.mod) > 0
+if mod_mode:
+    if args.non_matching:
+        sys.exit(
+            "--mod is incompatible with --non-matching, --debug, --asm, --linkable and --sym on"
+        )
+    if args.build_dir == Path("build"):
+        args.build_dir = Path("build-mod")
 
 
 config = ProjectConfig()
@@ -237,6 +255,28 @@ if not args.asm:
 
 config.generate_compile_commands = False  # Handled internally
 
+if mod_mode:
+    # Modded builds are fully isolated from the matching build: their own
+    # build dir, ninja file and ninja log, no objdiff.json/progress output,
+    # and `dtk dol apply` never runs (it would write shifted addresses back
+    # into symbols.txt).
+    config.progress = False
+    config.generate_objdiff = False
+    config.ninja_file = Path("build.mod.ninja")
+    config.ninja_builddir = args.build_dir
+
+    # Reuse the matching build's downloaded tools when present
+    def reuse_tool(current: Path | None, path: Path) -> Path | None:
+        return path if current is None and path.exists() else current
+
+    config.compilers_path = reuse_tool(config.compilers_path, Path("build/compilers"))
+    config.binutils_path = reuse_tool(config.binutils_path, Path("build/binutils"))
+    config.dtk_path = reuse_tool(config.dtk_path, Path("build/tools/dtk"))
+    config.objdiff_path = reuse_tool(config.objdiff_path, Path("build/tools/objdiff-cli"))
+    config.sjiswrap_path = reuse_tool(config.sjiswrap_path, Path("build/tools/sjiswrap.exe"))
+    if not is_windows():
+        config.wrapper = reuse_tool(config.wrapper, Path("build/tools/wibo"))
+
 # Tool versions
 config.binutils_tag = "2.42-2"
 config.compilers_tag = "20251118"
@@ -248,12 +288,19 @@ config.wibo_tag = "0.7.0"
 # Project
 config.config_path = Path("config") / config.version / "config.yml"
 config.check_sha_path = Path("config") / config.version / "build.sha1"
+if mod_mode:
+    # A modded DOL can never hash-match; point the check at an intentionally
+    # absent file so `ok` (and everything gated on it, like `apply`) is
+    # unbuildable from the mod manifest. build.sha1 names the matching
+    # build's DOL path, so the default check would wrongly verify (and
+    # unlock `apply` against) the matching build.
+    config.check_sha_path = args.build_dir / config.version / "mod.sha1"
 config.asflags = [
     "-mgekko",
     "--strip-local-absolute",
     "-I include",
     "-I src",
-    f"-I build/{config.version}/include",
+    f"-I {args.build_dir.as_posix()}/{config.version}/include",
     f"--defsym BUILD_VERSION={version_num}",
 ]
 config.ldflags = [
@@ -354,7 +401,7 @@ includes_base = [
     "src/MSL",
     "src/Runtime",
     "extern/dolphin/include",
-    f"build/{config.version}/include",
+    f"{args.build_dir.as_posix()}/{config.version}/include",
 ]
 
 cflags_melee = [
@@ -378,7 +425,7 @@ clang_system_includes = [
     "src/sysdolphin",
     "extern/dolphin/include",
     "extern/dolphin/src",
-    f"build/{config.version}/include",
+    f"{args.build_dir.as_posix()}/{config.version}/include",
 ]
 
 clang_warnings = [
@@ -503,7 +550,7 @@ def SysdolphinLib(lib_name: str, objects: Objects) -> Library:
         includes=[
             *includes_base,
             "src/sysdolphin",
-            f"build/{config.version}/sysdolphin",
+            f"{args.build_dir.as_posix()}/{config.version}/sysdolphin",
         ],
         category="hsd",
     )
@@ -1992,6 +2039,108 @@ def link_order_callback(module_id: int, objects: list[str]) -> list[str]:
 # config.link_order_callback = link_order_callback
 
 
+# Mod support (`configure.py --mod`, see docs/modding.md): compile each mod's
+# TUs like game code, append them to the DOL link order, and rename hooked
+# symbols in their defining objects so the mods' definitions take over. Hooks
+# are detected from the compiled mod objects: a scan step writes hooks.json,
+# which is a reconfigure dependency, so ninja closes the loop the same way it
+# bootstraps config.json.
+mod_units: list[str] = []
+if mod_mode:
+    from tools.mods import discover_mod, load_hook_scan, resolve_hooks
+
+    hook_tool = Path("tools") / "elf_hook.py"
+    hooks_json = config.out_path() / "hooks.json"
+    mod_obj_by_unit: dict[str, tuple[str, str]] = {}  # obj path -> (mod, unit)
+
+    mod_infos = [discover_mod(mod_dir) for mod_dir in args.mod]
+    for mod in mod_infos:
+        mod_includes = [
+            f"{mod.path.as_posix()}/src",
+            *[f"{mod.path.as_posix()}/{inc}" for inc in mod.includes],
+        ]
+        mod_defines = ["MOD", *mod.defines]
+        mod_objects: Objects = []
+        for src in mod.sources:
+            unit_name = src.as_posix()
+            mod_objects.append(
+                Object(
+                    Matching,
+                    unit_name,
+                    extra_clang_flags=[
+                        *[f"-I{inc}" for inc in mod_includes],
+                        *[f"-D{d}" for d in mod_defines],
+                    ],
+                )
+            )
+            mod_units.append(unit_name)
+            obj_path = config.out_path() / "src" / Path(unit_name).with_suffix(".o")
+            mod_obj_by_unit[obj_path.as_posix()] = (mod.name, unit_name)
+        config.libs.append(
+            Lib(
+                f"mod.{mod.name}",
+                mod_objects,
+                cflags=[
+                    *cflags_melee,
+                    *[f"-D{d}" for d in mod_defines],
+                ],
+                includes=[
+                    *includes_base,
+                    "src/melee",
+                    "src/melee/ft/chara",
+                    "src/sysdolphin",
+                    *mod_includes,
+                ],
+                src_dir=".",
+            )
+        )
+        config.reconfig_deps.extend([mod.path, mod.path / "src", *mod.sources])
+        if (mod.path / "mod.toml").is_file():
+            config.reconfig_deps.append(mod.path / "mod.toml")
+
+    if mod_obj_by_unit:
+        config.custom_build_rules = [
+            {
+                "name": "hook_scan",
+                "command": f"$python {hook_tool} --scan $out $in",
+                "description": "SCAN $out",
+                "restat": True,
+            }
+        ]
+        config.custom_build_steps = {
+            "post-compile": [
+                {
+                    "outputs": hooks_json,
+                    "rule": "hook_scan",
+                    "inputs": sorted(mod_obj_by_unit),
+                    "implicit": [hook_tool],
+                }
+            ]
+        }
+        # hooks.json regenerates the manifest, closing the detection loop
+        config.reconfig_deps.append(hooks_json)
+
+    (
+        config.symbol_renames,
+        config.symbol_local_hooks,
+        config.symbol_hook_wraps,
+    ) = resolve_hooks(
+        load_hook_scan(hooks_json),
+        mod_obj_by_unit,
+        Path("config") / config.version / "symbols.txt",
+        Path("config") / config.version / "splits.txt",
+    )
+    config.hook_tool = hook_tool
+
+    def mod_link_order(module_id: int, unit_names: list[str]) -> list[str]:
+        if module_id == 0:  # DOL
+            return unit_names + mod_units
+        return unit_names
+
+    config.link_order_callback = mod_link_order
+    config.default_targets = [config.out_path() / "main.dol"]
+
+
 # Extra categories for progress tracking
 config.progress_categories = [
     ProgressCategory("game", "Game Code"),
@@ -2009,7 +2158,11 @@ config.progress_report_args = [
 ]
 
 
-def generate_compile_commands(objects: dict[str, Object], build_config: BuildConfig):
+def generate_compile_commands(
+    objects: dict[str, Object],
+    build_config: BuildConfig,
+    out: Path = Path("compile_commands.json"),
+):
 
     clangd_config = []
 
@@ -2052,7 +2205,7 @@ def generate_compile_commands(objects: dict[str, Object], build_config: BuildCon
                 add_unit(unit)
 
     # Write compile_commands.json
-    with Path("compile_commands.json").open("w", encoding="utf-8") as w:
+    with out.open("w", encoding="utf-8") as w:
 
         def default_format(o):
             if isinstance(o, Path):
@@ -2063,7 +2216,7 @@ def generate_compile_commands(objects: dict[str, Object], build_config: BuildCon
 
 
 if args.mode == "configure":
-    if args.always_apply:
+    if args.always_apply and not mod_mode:
         config.custom_build_steps = {
             "post-ok": [
                 {
@@ -2095,7 +2248,17 @@ if args.mode == "configure":
                 exit(1)
 
     if args.compile_commands:
-        generate_compile_commands(objects, build_config)
+        # Modded configures keep the root compile_commands.json untouched;
+        # use e.g. `clangd --compile-commands-dir=build-mod` for mod TUs.
+        generate_compile_commands(
+            objects,
+            build_config,
+            out=(
+                args.build_dir / "compile_commands.json"
+                if mod_mode
+                else Path("compile_commands.json")
+            ),
+        )
 elif args.mode == "progress":
     # Print progress information
     calculate_progress(config)

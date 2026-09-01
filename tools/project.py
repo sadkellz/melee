@@ -200,6 +200,26 @@ class ProjectConfig:
         self.link_order_callback: Optional[Callable[[int, List[str]], List[str]]] = (
             None  # Callback to add/remove/reorder units within a module
         )
+        self.ninja_file: Path = Path("build.ninja")  # Output ninja file
+        self.ninja_builddir: Optional[Path] = (
+            None  # Sets ninja's builddir variable (.ninja_log/.ninja_deps location)
+        )
+        self.default_targets: Optional[List[Path]] = (
+            None  # Overrides the default ninja targets
+        )
+        self.generate_objdiff: bool = True  # Generate objdiff.json
+        self.symbol_renames: Dict[str, List[Tuple[str, str]]] = (
+            {}
+        )  # Unit name -> [(old, new)] symbol renames applied to the object before linking
+        self.symbol_local_hooks: Dict[str, List[str]] = (
+            {}
+        )  # Unit name -> local symbols to hook via the hook tool
+        self.symbol_hook_wraps: Dict[str, List[str]] = (
+            {}
+        )  # Unit name -> targets whose hook_<name> wrapper takes over <name>
+        self.hook_tool: Optional[Path] = (
+            None  # Symbol surgery script, required for symbol_local_hooks
+        )
         self.context_exclude_globs: List[str] = (
             []
         )  # Globs to exclude from context files
@@ -461,6 +481,8 @@ def generate_build_ninja(
     out = io.StringIO()
     n = ninja_syntax.Writer(out)
     n.variable("ninja_required_version", "1.3")
+    if config.ninja_builddir is not None:
+        n.variable("builddir", config.ninja_builddir)
     n.newline()
 
     configure_script = Path(os.path.relpath(os.path.abspath(sys.argv[0])))
@@ -694,6 +716,9 @@ def generate_build_ninja(
     mwld_cmd = f"{wrapper_cmd}{mwld} $ldflags -o $out @$out.rsp"
     mwld_implicit: List[Optional[Path]] = [compilers_implicit or mwld, wrapper_implicit]
 
+    # GNU objcopy
+    objcopy = binutils / f"powerpc-eabi-objcopy{EXE}"
+
     # GNU as
     gnu_as = binutils / f"powerpc-eabi-as{EXE}"
     gnu_as_cmd = (
@@ -786,6 +811,17 @@ def generate_build_ninja(
         # deps="gcc",
     )
     n.newline()
+
+    if config.symbol_renames or config.symbol_local_hooks or config.symbol_hook_wraps:
+        if config.hook_tool is None:
+            sys.exit("ProjectConfig.hook_tool is required for symbol hooks")
+        n.comment("Symbol surgery for hooks")
+        n.rule(
+            name="elf_hook",
+            command=f"$python {config.hook_tool} $hook_flags $in $out",
+            description="HOOK $out",
+        )
+        n.newline()
 
     n.comment("Build precompiled header")
     n.rule(
@@ -1162,12 +1198,36 @@ def generate_build_ninja(
                 link_built_obj = True
                 built_obj_path = asm_build(obj, obj.asm_path, obj.asm_obj_path)
 
+            chosen_obj_path: Optional[Path] = None
             if link_built_obj and built_obj_path is not None:
                 # Use the source-built object
-                link_step.add(built_obj_path)
+                chosen_obj_path = built_obj_path
             elif obj_path is not None:
                 # Use the original (extracted) object
-                link_step.add(Path(obj_path))
+                chosen_obj_path = Path(obj_path)
+            if chosen_obj_path is None:
+                return
+
+            # Apply symbol renames and hooks before linking
+            renames = config.symbol_renames.get(obj_name)
+            local_hooks = config.symbol_local_hooks.get(obj_name)
+            hook_wraps = config.symbol_hook_wraps.get(obj_name)
+            if renames or local_hooks or hook_wraps:
+                hooked_path = build_path / "hooked" / Path(obj_name).with_suffix(".o")
+                hook_flags = [
+                    *(f"--redefine {old}={new}" for old, new in renames or []),
+                    *(f"--local {name}" for name in local_hooks or []),
+                    *(f"--hook-wrap {name}" for name in hook_wraps or []),
+                ]
+                n.build(
+                    outputs=hooked_path,
+                    rule="elf_hook",
+                    inputs=chosen_obj_path,
+                    implicit=config.hook_tool,
+                    variables={"hook_flags": " ".join(hook_flags)},
+                )
+                chosen_obj_path = hooked_path
+            link_step.add(chosen_obj_path)
 
         # Add DOL link step
         link_step = LinkStep(build_config)
@@ -1517,8 +1577,11 @@ def generate_build_ninja(
         generator=True,
         description=f"RUN {configure_script}",
     )
+    regen_outputs = [str(config.ninja_file)]
+    if config.generate_objdiff:
+        regen_outputs.append("objdiff.json")
     n.build(
-        outputs=["build.ninja", "objdiff.json"],
+        outputs=regen_outputs,
         rule="configure",
         implicit=[
             build_config_path,
@@ -1535,7 +1598,9 @@ def generate_build_ninja(
     ###
     n.comment("Default rule")
     if build_config:
-        if config.non_matching:
+        if config.default_targets is not None:
+            n.default(list(map(serialize_path, config.default_targets)))
+        elif config.non_matching:
             n.default(link_outputs)
         elif config.progress:
             n.default("progress")
@@ -1545,7 +1610,7 @@ def generate_build_ninja(
         n.default(build_config_path)
 
     # Write build.ninja
-    with open("build.ninja", "w", encoding="utf-8") as f:
+    with open(config.ninja_file, "w", encoding="utf-8") as f:
         f.write(out.getvalue())
     out.close()
 
@@ -1556,7 +1621,7 @@ def generate_objdiff_config(
     objects: Dict[str, Object],
     build_config: Optional[BuildConfig],
 ) -> None:
-    if build_config is None:
+    if build_config is None or not config.generate_objdiff:
         return
 
     # Load existing objdiff.json

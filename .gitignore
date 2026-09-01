@@ -12,8 +12,10 @@ ctx.*
 
 # Build files
 build/
+build-mod/
 .ninja_*
 build.ninja
+build.mod.ninja
 
 # IDE folders
 .idea/
