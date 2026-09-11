@@ -1,6 +1,6 @@
-name: Pointer cast index
+name: Cleanup index
 
-run-name: Rebuild the pointer cast index
+run-name: Rebuild the cleanup index
 
 # Upstream already publishes GitHub Pages from the melee-docs derivation in
 # build.yml, so this workflow stays out of the way there and only runs on forks.
@@ -9,9 +9,9 @@ on:
   push:
     paths:
       - 'src/**'
-      - 'tools/ptr_casts.py'
-      - 'tools/ptr-casts-template.html'
-      - '.github/workflows/ptr-casts.yml'
+      - 'tools/cleanup_index.py'
+      - 'tools/cleanup-index-template.html'
+      - '.github/workflows/cleanup-index.yml'
   workflow_dispatch:
 
 permissions:
@@ -33,15 +33,16 @@ jobs:
 
       - name: Build the index
         run: |
-          python3 tools/ptr_casts.py \
-            --out build/ptr-casts \
+          python3 tools/cleanup_index.py \
+            --out build/cleanup-index \
             --revision "${{github.sha}}" \
-            --generated "$(date -u +'%Y-%m-%d')"
+            --generated "$(date -u +'%Y-%m-%d')" \
+            --repo "${{github.server_url}}/${{github.repository}}"
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: build/ptr-casts
+          path: build/cleanup-index
 
   deploy:
     name: Deploy to GitHub Pages

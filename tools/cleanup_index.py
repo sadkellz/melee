@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Inventories every pointer cast and byte-offset walk in the source tree.
+Inventories the cleanup surface of the source tree: pointer casts, byte-offset
+walks, m2c field-access macros, MUST_MATCH regions and compiler pragmas.
 
 Each site is classified once by its outermost form, so `*(f32*) ((u8*) p + 0xE0)`
 counts as one cast+offset rather than as three separate casts. The sites that move
@@ -8,9 +9,9 @@ a pointer by a literal constant are the ones worth chasing: each is a struct fie
 that has not been named yet.
 
 Usage:
-    python tools/ptr_casts.py                       # summary to stdout
-    python tools/ptr_casts.py --tsv -               # TSV to stdout
-    python tools/ptr_casts.py --out build/ptr-casts # index.html + ptr_casts.tsv
+    python tools/cleanup_index.py                       # summary to stdout
+    python tools/cleanup_index.py --tsv -               # TSV to stdout
+    python tools/cleanup_index.py --out build/cleanup-index # index.html + cleanup_index.tsv
 """
 
 import argparse
@@ -20,10 +21,10 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import Iterator, NamedTuple, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATE = Path(__file__).resolve().parent / "ptr-casts-template.html"
+TEMPLATE = Path(__file__).resolve().parent / "cleanup-index-template.html"
 
 # Types that never name a struct, used to split plain casts into two buckets.
 PRIMITIVES = {
@@ -55,18 +56,32 @@ TO_INT = re.compile(
 BARE_OFFSET = re.compile(r"(?<![\w.>])([A-Za-z_]\w*)\s*([-+])\s*(0[xX][0-9a-fA-F]+)\b")
 DECL = re.compile(r"\b[A-Za-z_]\w*\s*\*+\s*(?:const\s+)?([A-Za-z_]\w*)\s*(?=[,;)=\[])")
 SIZEOF = re.compile(r"\bsizeof\s*$")
+M2C_FIELD = re.compile(r"\bM2C_FIELD\s*\(")
+MUST_MATCH_IF = re.compile(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|elif)\b.*\bMUST_MATCH\b")
+DIRECTIVE = re.compile(r"^[ \t]*#[ \t]*(\w+)")
+PRAGMA = re.compile(r"^[ \t]*#[ \t]*pragma[ \t]+(.*?)[ \t]*$")
+ORDER_FN = re.compile(r"\bstatic\s+\w+\s+(order_\w+|\w+_order\w*)\s*\(")
+HELPER_FN = re.compile(r"\bstatic\s+(?:inline\s+)?[\w* ]+?\b(\w+)\s*\(")
+STACK_PAD = re.compile(r"\bPAD_STACK\s*\(([^)]*)\)")
+DEFINE = re.compile(r"^#\s*define\s+(\w+)", re.M)
 
-# Ordered most to least common; the warm ones move a pointer, the cool ones retype it.
+# (name, shape, family). The family drives the colour on the page: `move` sites
+# walk a pointer by a constant, `retype` sites only change its type, and `hack`
+# regions are compiled only in the matching build.
 CATEGORIES = [
-    ("struct-ptr-cast", "retype to a struct", False),
-    ("prim-ptr-cast", "retype to u8*/void*/f32*…", False),
-    ("deref-cast", "*(T*)expr", False),
-    ("cast+offset", "(T*)p + 0xNN", True),
-    ("ptr-to-int", "(u32)p", False),
-    ("cast+index", "((T*)p)[n]", True),
-    ("raw-offset", "p + 0xNN, p already typed", True),
-    ("abs-address", "(T*)0xNNNNNNNN", True),
+    ("cast+offset", "(T*)p + 0xNN", "move"),
+    ("cast+index", "((T*)p)[n]", "move"),
+    ("raw-offset", "p + 0xNN, p typed", "move"),
+    ("m2c-field", "M2C_FIELD(p, T*, off)", "move"),
+    ("abs-address", "(T*)0xNNNNNNNN", "move"),
+    ("struct-ptr-cast", "(Struct*)p", "retype"),
+    ("prim-ptr-cast", "(u8*)p, (void*)p", "retype"),
+    ("deref-cast", "*(T*)p", "retype"),
+    ("ptr-to-int", "(u32)p", "retype"),
+    ("must-match", "#ifdef MUST_MATCH", "hack"),
+    ("pragma", "#pragma, not push/pop", "hack"),
 ]
+FAMILY = {name: family for name, _, family in CATEGORIES}
 
 
 class Site(NamedTuple):
@@ -169,28 +184,132 @@ def classify(ty: str) -> str:
     return "prim-ptr-cast" if head in PRIMITIVES else "struct-ptr-cast"
 
 
+def macro_args(text: str, open_paren: int) -> list[str]:
+    """Split the arguments of the call whose `(` sits at open_paren."""
+    args, depth, arg_start = [], 0, open_paren + 1
+    for i in range(open_paren, len(text)):
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                args.append(text[arg_start:i].strip())
+                return args
+        elif c == "," and depth == 1:
+            args.append(text[arg_start:i].strip())
+            arg_start = i + 1
+    return args
+
+
+def must_match_regions(lines: list[str]) -> Iterator[tuple[int, str, list[str]]]:
+    """Yield (directive index, directive, body lines) for each MUST_MATCH region.
+
+    The body runs to the matching #else/#elif/#endif; nested conditionals are
+    skipped over so they cannot end the region early.
+    """
+    for i, line in enumerate(lines):
+        m = MUST_MATCH_IF.match(line)
+        if not m:
+            continue
+        body, depth = [], 0
+        for j in range(i + 1, len(lines)):
+            d = DIRECTIVE.match(lines[j])
+            name = d[1] if d else ""
+            if name in ("if", "ifdef", "ifndef"):
+                depth += 1
+            elif name == "endif":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif name in ("else", "elif") and depth == 0:
+                break
+            body.append(lines[j])
+        yield i, m[1], body
+
+
+def pragma_sites(lines: list[str]) -> Iterator[tuple[int, str, bool]]:
+    """Yield (line index, pragma text, guarded) for each pragma that is not
+    push/pop plumbing. `guarded` is true inside a MUST_MATCH branch, including
+    the #else of an #ifndef MUST_MATCH.
+    """
+    # One entry per open conditional: "on" inside a MUST_MATCH branch,
+    # "off" inside the branch that excludes it, None if unrelated.
+    stack: list[Optional[str]] = []
+    for i, line in enumerate(lines):
+        d = DIRECTIVE.match(line)
+        if not d:
+            continue
+        name = d[1]
+        if name in ("if", "ifdef", "ifndef"):
+            if MUST_MATCH_IF.match(line):
+                stack.append("off" if name == "ifndef" else "on")
+            else:
+                stack.append(None)
+        elif name == "elif" and stack:
+            stack[-1] = "on" if MUST_MATCH_IF.match(line) else None
+        elif name == "else" and stack:
+            stack[-1] = {"on": "off", "off": "on"}.get(stack[-1])
+        elif name == "endif" and stack:
+            stack.pop()
+        elif name == "pragma":
+            text = PRAGMA.match(line)[1]
+            if text not in ("push", "pop"):
+                yield i, text, "on" in stack
+
+
+def classify_hack(body: list[str]) -> Optional[tuple[str, str]]:
+    """Return (kind, detail) for a MUST_MATCH body, or None if the region holds
+    nothing but pragmas, which are indexed on their own by pragma_sites().
+    """
+    stripped = [l.strip() for l in body if l.strip()]
+    code = [l for l in stripped if not l.startswith("#")]
+    code_text = "\n".join(code)
+
+    if not code:
+        return None
+    # Data-order functions are named order_* by convention, but any static
+    # function whose body is only `(void) literal;` statements is one.
+    if m := ORDER_FN.search(code_text):
+        return "data order", m[1]
+    if re.search(r"^\(void\)", code_text, re.M) and (m := HELPER_FN.search(code_text)):
+        return "data order", m[1]
+    if re.search(r"\basm\b", code_text):
+        return "asm", ""
+    if m := STACK_PAD.search(code_text):
+        return "stack pad", f"PAD_STACK({m[1].strip()})"
+    if m := DEFINE.search("\n".join(stripped)):
+        return "macro", m[1]
+    if m := HELPER_FN.search(code_text):
+        return "helper", m[1]
+    return "code", ""
+
+
 def scan_file(path: Path, rel: str) -> Iterator[Site]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     text = blank_noise(raw)
     lines = raw.split("\n")
+    blank_lines = text.split("\n")
 
     offsets, acc = [], 0
-    for line in text.split("\n"):
+    for line in blank_lines:
         offsets.append(acc)
         acc += len(line) + 1
 
     claimed: dict[int, int] = {}
     found: list[Site] = []
 
+    def source_at(line: int) -> str:
+        return lines[line - 1].strip()[:150] if line - 1 < len(lines) else ""
+
     def emit(category: str, start: int, ty: str, detail: str, rank: int) -> None:
         if claimed.get(start, -1) >= rank:
             return
         claimed[start] = rank
         line = bisect.bisect_right(offsets, start)
-        source = lines[line - 1].strip() if line - 1 < len(lines) else ""
         found.append(Site(
             category, rel, line, re.sub(r"\s+", " ", ty).strip(),
-            detail, source[:150]))
+            detail, source_at(line)))
 
     # An outer form claims its position and swallows the plain cast nested in it.
     offset_spans, wrapper_spans = [], []
@@ -213,6 +332,16 @@ def scan_file(path: Path, rel: str) -> Iterator[Site]:
             continue
         emit(classify(m[1]), m.start(), m[1] + m[2], "", 1)
 
+    # M2C_FIELD(expr, T*, offset) is a cast+offset that m2c left behind.
+    for m in M2C_FIELD.finditer(text):
+        prefix = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+        if re.match(r"\s*#\s*define\s*$", prefix):
+            continue
+        args = macro_args(text, m.end() - 1)
+        if len(args) == 3:
+            sign = "-" if args[2].startswith("-") else "+"
+            emit("m2c-field", m.start(), args[1], f"{sign} {args[2].lstrip('-')}", 7)
+
     # Both of these need to know which identifiers are pointers, so they are
     # heuristic where the syntactic categories above are exact.
     visible = pointer_names(text)
@@ -224,6 +353,26 @@ def scan_file(path: Path, rel: str) -> Iterator[Site]:
             continue
         if m[1] in visible(m.start()):
             emit("raw-offset", m.start(), "", f"{m[2]} {m[3]}", 0)
+
+    for i, pragma, guarded in pragma_sites(blank_lines):
+        detail = "MUST_MATCH" if guarded else "unguarded"
+        found.append(Site("pragma", rel, i + 1, pragma, detail, source_at(i + 1)))
+
+    # MUST_MATCH regions are reported at their directive but show the first
+    # body line, so the listing says what the hack is rather than `#ifdef`.
+    for i, directive, body in must_match_regions(blank_lines):
+        hack = classify_hack(body)
+        if hack is None:
+            continue
+        kind, detail = hack
+        if directive == "ifndef":
+            detail = f"#ifndef {detail}".strip()
+        meaningful = (
+            j for j, l in enumerate(body)
+            if l.strip() and l.strip() != "#pragma push")
+        first = next(meaningful, None)
+        source = source_at(i + 2 + first) if first is not None else source_at(i + 1)
+        found.append(Site("must-match", rel, i + 1, kind, detail, source))
 
     seen = set()
     for site in found:
@@ -243,8 +392,8 @@ def scan_tree(src: Path) -> list[Site]:
 
 
 def directory_of(rel: str) -> str:
-    parts = rel.split("/")
-    return "/".join(parts[:3] if len(parts) >= 3 else parts[:2])
+    """The directory of a file, at most three levels deep (src/melee/gr)."""
+    return "/".join(rel.split("/")[:-1][:3])
 
 
 def write_tsv(sites: list[Site], out) -> None:
@@ -253,12 +402,16 @@ def write_tsv(sites: list[Site], out) -> None:
         out.write(f"{s.category}\t{s.file}\t{s.line}\t{s.type}\t{s.detail}\t{s.source}\n")
 
 
-def write_html(sites: list[Site], path: Path, revision: str, generated: str) -> None:
+def write_html(
+    sites: list[Site], path: Path, revision: str, generated: str, repo: str,
+) -> None:
     payload = json.dumps([list(s) for s in sites], separators=(",", ":"))
     meta = json.dumps({
         "revision": revision,
         "generated": generated,
+        "repo": repo.rstrip("/"),
         "files": len({s.file for s in sites}),
+        "categories": CATEGORIES,
     }, separators=(",", ":"))
     html = TEMPLATE.read_text(encoding="utf-8")
     html = html.replace("__PAYLOAD__", payload.replace("</", "<\\/"))
@@ -268,14 +421,20 @@ def write_html(sites: list[Site], path: Path, revision: str, generated: str) -> 
 
 def summarize(sites: list[Site]) -> None:
     by_category = Counter(s.category for s in sites)
-    warm = {name for name, _, is_warm in CATEGORIES if is_warm}
-    moving = sum(v for k, v in by_category.items() if k in warm)
+    by_family = Counter(FAMILY[s.category] for s in sites)
     print(
-        f"{len(sites)} sites in {len({s.file for s in sites})} files "
-        f"({moving} move a pointer)\n")
-    for name, shape, _ in CATEGORIES:
+        f"{len(sites)} sites in {len({s.file for s in sites})} files: "
+        f"{by_family['move']} move a pointer, {by_family['retype']} retype one, "
+        f"{by_family['hack']} match hacks\n")
+    for name, shape, family in CATEGORIES:
         if by_category[name]:
-            print(f"  {by_category[name]:5d}  {name:<17} {shape}")
+            print(f"  {by_category[name]:5d}  {name:<17} {family:<7} {shape}")
+    print("\n  MUST_MATCH regions by kind")
+    for kind, n in Counter(s.type for s in sites if s.category == "must-match").most_common():
+        print(f"  {n:5d}  {kind}")
+    print("\n  pragmas")
+    for kind, n in Counter(s.type for s in sites if s.category == "pragma").most_common(8):
+        print(f"  {n:5d}  {kind}")
     print("\n  top directories")
     for d, n in Counter(directory_of(s.file) for s in sites).most_common(8):
         print(f"  {n:5d}  {d}")
@@ -291,13 +450,15 @@ def main() -> int:
     ap.add_argument("--src", type=Path, default=ROOT / "src",
                     help="tree to scan (default: src)")
     ap.add_argument("--out", type=Path,
-                    help="directory to write index.html and ptr_casts.tsv into")
+                    help="directory to write index.html and cleanup_index.tsv into")
     ap.add_argument("--tsv", type=Path,
                     help="write the TSV here instead ('-' for stdout)")
     ap.add_argument("--revision", default="working tree",
                     help="revision label shown on the page")
     ap.add_argument("--generated", default="",
                     help="build date shown on the page")
+    ap.add_argument("--repo", default="https://github.com/doldecomp/melee",
+                    help="repository URL that line links on the page point into")
     args = ap.parse_args()
 
     sites = scan_tree(args.src)
@@ -310,11 +471,12 @@ def main() -> int:
                 write_tsv(sites, fh)
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
-        write_html(sites, args.out / "index.html", args.revision, args.generated)
-        with (args.out / "ptr_casts.tsv").open("w", encoding="utf-8") as fh:
+        write_html(
+            sites, args.out / "index.html", args.revision, args.generated, args.repo)
+        with (args.out / "cleanup_index.tsv").open("w", encoding="utf-8") as fh:
             write_tsv(sites, fh)
         print(
-            f"wrote {args.out}/index.html and {args.out}/ptr_casts.tsv "
+            f"wrote {args.out}/index.html and {args.out}/cleanup_index.tsv "
             f"({len(sites)} sites)")
     if not args.tsv and not args.out:
         summarize(sites)
