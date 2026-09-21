@@ -22,6 +22,7 @@
 #include <melee/ft/ftcommon.h>
 #include <melee/ft/types.h>
 #include <melee/mp/mpcoll.h>
+#include <ucf/shielddrop.h>
 
 bool ftCo_80099F1C(Fighter_GObj* gobj)
 {
@@ -54,7 +55,9 @@ bool ftCo_8009A080(Fighter_GObj* gobj)
 {
     u8 _[8];
     Fighter* fp = gobj->user_data;
-    if (fp->input.held_buttons[0] & HSD_PAD_LR && ftCo_80099F1C(gobj)) {
+    if (fp->input.held_buttons[0] & HSD_PAD_LR &&
+        (ftCo_80099F1C(gobj) || ucfPass_CheckGuardInput(fp)))
+    {
         ftCo_8009A228(gobj);
         return true;
     }

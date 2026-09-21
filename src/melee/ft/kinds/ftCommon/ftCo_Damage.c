@@ -57,6 +57,7 @@
 #include <melee/sfx/crowdsfx.h>
 #include <sysdolphin/baselib/mtx.h>
 #include <sysdolphin/baselib/random.h>
+#include <ucf/sdi.h>
 
 int ftCo_803C5520[2][4][3] = {
     {
@@ -502,7 +503,8 @@ void ftCo_Damage_OnEveryHitlag(Fighter_GObj* gobj)
         VEC2_SQ_LEN(fp->input.lstick[0]) >=
             SQ(p_ftCommonData->sdi_min_stick_mag) &&
         (fp->active_timer.lstick.x < p_ftCommonData->sdi_stick_window ||
-         fp->active_timer.lstick.y < p_ftCommonData->sdi_stick_window))
+         fp->active_timer.lstick.y < p_ftCommonData->sdi_stick_window ||
+         ucfDamage_CheckSDI(fp)))
     {
         float scaled_lstick_x =
             fp->input.lstick[0].x * p_ftCommonData->sdi_pos_scale;

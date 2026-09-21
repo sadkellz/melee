@@ -21,6 +21,7 @@
 #include <melee/ft/kinds/ftYoshi/ftyoshi.h>
 #include <melee/ft/kinds/ftYoshi/ftyoshiguard.h>
 #include <melee/ft/types.h>
+#include <ucf/shielddrop.h>
 
 /* 0992A8 */ static void ftCo_800992A8(Fighter_GObj* gobj, FtMotionId msid,
                                        bool);
@@ -208,7 +209,9 @@ static inline bool inlineB0(Fighter* fp)
 bool ftCo_80099794(Fighter_GObj* gobj)
 {
     Fighter* fp = gobj->user_data;
-    if (fp->input.held_buttons[0] & HSD_PAD_LR && inlineB0(fp)) {
+    if (fp->input.held_buttons[0] & HSD_PAD_LR && inlineB0(fp) &&
+        !ucfEscape_IsPassInput(fp))
+    {
         ftCo_80099894(gobj);
         return true;
     }
@@ -218,7 +221,7 @@ bool ftCo_80099794(Fighter_GObj* gobj)
 bool ftCo_8009980C(Fighter_GObj* gobj)
 {
     Fighter* fp = gobj->user_data;
-    if (inlineB0(fp) || ftCo_800DF8E8(fp)) {
+    if ((inlineB0(fp) || ftCo_800DF8E8(fp)) && !ucfEscape_IsPassInput(fp)) {
         ftCo_80099894(gobj);
         return true;
     }

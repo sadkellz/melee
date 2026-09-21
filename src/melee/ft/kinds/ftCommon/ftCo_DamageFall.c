@@ -22,6 +22,7 @@
 #include <melee/ft/ft_0881.h>
 #include <melee/ft/ftcommon.h>
 #include <melee/ft/types.h>
+#include <ucf/tumble.h>
 
 void ftCo_80090574(Fighter_GObj* gobj)
 {
@@ -122,7 +123,8 @@ void ftCo_DamageFall_IASA(HSD_GObj* gobj)
         RETURN_IF(ftCo_800D705C(gobj));
         RETURN_IF(ftCo_800CB870(gobj));
         if (ABS(fp->input.lstick[0].x) >= p_ftCommonData->x210 &&
-            fp->active_timer.lstick.x < p_ftCommonData->x214)
+            (fp->active_timer.lstick.x < p_ftCommonData->x214 ||
+             ucfDamageFall_CheckInput(fp)))
         {
             ftCo_Fall_Enter(gobj);
             return;

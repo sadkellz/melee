@@ -1623,6 +1623,16 @@ config.libs = [
             Object(Matching, "melee/sfx/crowdsfx.c"),
         ],
     ),
+    MeleeLib(
+        "ucf (Universal Controller Fix)",
+        [
+            Object(Equivalent, "ucf/input.c"),
+            Object(Equivalent, "ucf/dashback.c"),
+            Object(Equivalent, "ucf/sdi.c"),
+            Object(Equivalent, "ucf/tumble.c"),
+            Object(Equivalent, "ucf/shielddrop.c"),
+        ],
+    ),
     RuntimeLib(
         "Gekko runtime",
         [

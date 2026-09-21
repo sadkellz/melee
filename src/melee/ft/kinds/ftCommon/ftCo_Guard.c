@@ -38,6 +38,7 @@
 #include <melee/pl/plbonuslib.h>
 #include <sysdolphin/baselib/gobj.h>
 #include <sysdolphin/baselib/jobj.h>
+#include <ucf/sdi.h>
 
 /* 091BC4 */ static void ftCo_80091BC4(Fighter* fp);
 /* 091E78 */ static void ftCo_80091E78(Fighter_GObj* gobj, float);
@@ -720,7 +721,8 @@ void ftCo_80093240(Fighter_GObj* gobj)
         if ((fp->input.lstick[0].x < 0 ? -fp->input.lstick[0].x
                                        : fp->input.lstick[0].x) >=
                 p_ftCommonData->sdi_min_stick_mag &&
-            fp->active_timer.lstick.x < p_ftCommonData->sdi_stick_window)
+            (fp->active_timer.lstick.x < p_ftCommonData->sdi_stick_window ||
+             ucfGuard_CheckSDI(fp)))
         {
             float scl = p_ftCommonData->x4C0 * (fp->input.lstick[0].x *
                                                 p_ftCommonData->sdi_pos_scale);

@@ -25,13 +25,14 @@
 #include <melee/ft/ft_0892.h>
 #include <melee/ft/inlines.h>
 #include <melee/ft/types.h>
+#include <ucf/dashback.h>
 
 /* 0D6620 */ static void ftCo_SquatRv_Enter(Fighter_GObj* gobj);
 
 bool ftCo_SquatRv_CheckInput(Fighter_GObj* gobj)
 {
     Fighter* fp = GET_FIGHTER(gobj);
-    if (fp->input.lstick[0].y > -p_ftCommonData->x94) {
+    if (fp->input.lstick[0].y > -ucfSquatRv_GetThreshold(fp)) {
         ftCo_SquatRv_Enter(gobj);
         return true;
     }

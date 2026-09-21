@@ -24,6 +24,7 @@
 #include <melee/ft/ft_0892.h>
 #include <melee/ft/inlines.h>
 #include <melee/ft/types.h>
+#include <ucf/dashback.h>
 
 bool ftCo_800C97A8(Fighter_GObj* gobj)
 {
@@ -103,6 +104,9 @@ void ftCo_Turn_IASA(Fighter_GObj* gobj)
     }
     if (!fp->mv.co.turn.has_turned) {
         fp->facing_dir = -fp->facing_dir;
+
+        /// ucf: may complete the turn so that the dash check below can pass.
+        ucfTurn_CheckSmash(fp);
     }
 
     RETURN_IF(ftCo_SpecialS_CheckInput(gobj));

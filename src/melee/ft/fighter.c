@@ -91,6 +91,7 @@
 #include <sysdolphin/baselib/lobj.h>
 #include <sysdolphin/baselib/mtx.h>
 #include <sysdolphin/baselib/random.h>
+#include <ucf/input.h>
 
 extern MotionState* ftData_CharacterStateTables[Ft_Kind_Max];
 
@@ -2043,6 +2044,8 @@ void Fighter_procInput(Fighter_GObj* gobj)
             if (fp->active_duration.trigger > 254) {
                 fp->active_duration.trigger = 254;
             }
+
+            ucfInput_Update(fp);
 
             if (fp->input.triggers[0] >=
                 p_ftCommonData->shield_press_threshold)
