@@ -793,7 +793,7 @@ void Fighter_UnkInitLoad_80068914(Fighter_GObj* gobj,
 
     fp->can_walljump = false;
 
-    fp->x60C = 0;
+    fp->x60C = NULL;
 
     fp->x2225_b3 = 0;
     fp->is_sandbag = 0;
@@ -1711,7 +1711,6 @@ void Fighter_procCpu(Fighter_GObj* gobj)
     }
 }
 
-/// https://decomp.me/scratch/A7CgG
 void Fighter_UnkIncrementCounters_8006ABEC(Fighter_GObj* gobj)
 {
     Fighter* fp = GET_FIGHTER(gobj);
@@ -2147,7 +2146,6 @@ void Fighter_procInput(Fighter_GObj* gobj)
     }
 }
 
-//// https://decomp.me/scratch/oFu1o
 #define VEC_CLEAR(vec)                                                        \
     do {                                                                      \
         Vec3* vecLocal = (void*) &vec;                                        \
